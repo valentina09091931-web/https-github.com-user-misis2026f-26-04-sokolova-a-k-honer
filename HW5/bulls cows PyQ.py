@@ -1,0 +1,240 @@
+import sys
+import random
+from PyQt6.QtWidgets import(
+    QApplication, QWidget, QLabel, QLineEdit, QPushButton,
+    QVBoxLayout, QHBoxLayout, QComboBox, QTextEdit, QMessageBox,
+    QDialog, QTableWidget, QTableWidgetItem, QHeaderView
+)
+from PyQt6.QtCore import Qt
+import db
+def generate_secret(length=4):
+    digits=list("0123456789")
+    random.shuffle(digits)
+    if digits[0]=="0":
+        for i in range(1, len(digits)):
+            if digits[i]!="0":
+                digits[0], digits[i]=digits[i],digits[0]
+                break
+    return "".join(digits[:length])
+def count_bulls_cows(guess, target):
+    bulls =sum(1 for i in range(len(target)) if guess[i]==target[i])
+    cows=sum(1 for d in guess if d in target)-bulls
+    return bulls, cows
+
+class HistoryDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("История и статистика")
+        self.resize(620, 500)
+        self.init_ui()
+    def init_ui(self):
+        layout=QVBoxLayout(self)
+        stats=db.get_stats()
+        total=stats["total"] or 0
+        wins=stats["wins"] or 0
+        avg=f"{stats['avg_attempts']:.1f}" if stats["avg_attempts"] else "-"
+        stats_label=QLabel(
+            f"Всего партий: {total} Побед: {wins} "
+            f"Среднее попыток при победе: {avg}"
+        )
+        stats_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(stats_label)
+        table=QTableWidget()
+        table.setColumnCount(5)
+        table.setHorizontalHeaderLabels(
+            ["Игрок","Длина","Попыток","Результат","Дата"]
+        )
+        table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        rows=db.get_history()
+        table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            values=[
+                row["player"],
+                str(row["length"]),
+                str(row["attempts"]),
+                "✅ Победа" if row["won"] else "❌ Проигрыш",
+                row["played_at"].replace("T"," ")
+            ]
+            for c,val in enumerate(values):
+                item=QTableWidgetItem(val)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(r,c,item)
+                layout.addWidget(table)
+class BullsCowsWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.secret=""
+        self.attempts=0
+        self.current_length=4
+        self.setWindowTitle("Быки и коровы")
+        self.setFixedSize(480,660)
+        self.init_ui()
+        self.new_game()
+    def init_ui(self):
+        main=QVBoxLayout(self)
+        main.setContentsMargins(20, 20, 20, 20)
+        main.setSpacing(8)
+        title=QLabel("🐂🐄 Быки и коровы")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        main.addWidget(title)
+        name_row=QHBoxLayout()
+        name_row.addWidget(QLabel("Имя игрока:"))
+        self.player_input=QLineEdit("Гость")
+        name_row.addWidget(self.player_input)
+        main.addLayout(name_row)
+        top_row=QHBoxLayout()
+        top_row.addWidget(QLabel("Длина числа:"))
+        self.length_combo=QComboBox()
+        self.length_combo.addItems(["3","4","5"])
+        self.length_combo.setCurrentText("4")
+        self.length_combo.currentIndexChanged.connect(self.new_game)
+        top_row.addWidget(self.length_combo)
+        top_row.addStretch()
+        self.btn_new=QPushButton("🔄 Новая игра")
+        self.btn_history=QPushButton("История")
+        self.btn_new.clicked.connect(self.new_game)
+        self.btn_history.clicked.connect(self.open_history)
+        top_row.addWidget(self.btn_new)
+        top_row.addWidget(self.btn_history)
+        main.addLayout(top_row)
+        self.info_label=QLabel("Нажмите <Новая игра>")
+        self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main.addWidget(self.info_label)
+        self.attempts_label=QLabel("Попыток: 0")
+        self.attempts_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main.addWidget(self.attempts_label)
+        self.record_label=QLabel("🏆 Рекорд: -")
+        self.record_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.record_label.setStyleSheet("color: #a06000; font-style: italic;")
+        main.addWidget(self.record_label)
+        input_row=QHBoxLayout()
+        self.guess_input=QLineEdit()
+        self.guess_input.setPlaceholderText("ВВедите число")
+        self.guess_input.setStyleSheet("font-family: Courier; font-size: 16px;")
+        self.guess_input.returnPressed.connect(self.check_guess)
+        self.btn_check=QPushButton("Проверить")
+        self.btn_check.clicked.connect(self.check_guess)
+        input_row.addWidget(self.guess_input)
+        input_row.addWidget(self.btn_check)
+        main.addLayout(input_row)
+        self.btn_giveup=QPushButton("🏳 Сдаться")
+        self.btn_giveup.clicked.connect(self.give_up)
+        main.addWidget(self.btn_giveup)
+        main.addWidget(QLabel("История текущей партии:"))
+        self.history_box=QTextEdit()
+        self.history_box.setReadOnly(True)
+        self.history_box.setStyleSheet("font-family: Courier; font-size: 12px;")
+        main.addWidget(self.history_box)
+        legent=QLabel("🐂 — цифра на месте    🐄 — цифра есть, но не там")
+        legent.setStyleSheet("color: blue; font-size: 10px;")
+        legent.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main.addWidget(legent)
+    def refresh_record_label(self):
+        row=db.get_best_result(self.current_length)
+        if row and row["best"] is not None:
+            self.record_label.setText(
+                f"🏆 Рекорд ({self.current_length} цифры): "
+                f"{row['best']} попыток — {row['player']}"
+            )
+        else:
+            self.record_label.setText(
+                f"🏆 Рекорд ({self.current_length} цифры): пока нет"
+            )
+    def new_game(self):
+        self.current_length=int(self.length_combo.currentText())
+        self.secret=generate_secret(self.current_length)
+        self.attempts=0
+        self.info_label.setText(
+            f"Я загадал {self.current_length}-значное число с уникальными цифрами."
+        )
+        self.attempts_label.setText("Попыток: 0")
+        self.history_box.clear()
+        self.guess_input.clear()
+        self.guess_input.setFocus()
+
+        self.btn_check.setEnabled(True)
+        self.guess_input.setEnabled(True)
+        self.btn_giveup.setEnabled(True)
+
+        self.refresh_record_label()
+
+    def check_guess(self):
+        raw = self.guess_input.text().strip()
+        length = len(self.secret)
+
+        if not raw:
+            QMessageBox.warning(self, "Внимание", "Введите число!")
+            return
+        if not raw.isdigit():
+            QMessageBox.critical(self, "Ошибка", "Только цифры!")
+            self.guess_input.clear()
+            return
+        if len(raw) != length:
+            QMessageBox.warning(self, "Внимание", f"Нужно ровно {length} цифр!")
+            return
+        if len(set(raw)) != length:
+            QMessageBox.warning(self, "Внимание", "Цифры не должны повторяться!")
+            return
+
+        self.attempts += 1
+        bulls, cows = count_bulls_cows(raw, self.secret)
+
+        self.attempts_label.setText(f"Попыток: {self.attempts}")
+        self.history_box.append(
+            f"{self.attempts:>2}. {raw}  →  🐂 {bulls}  🐄 {cows}"
+        )
+
+        if bulls == length:
+            player = self.player_input.text().strip() or "Гость"
+            db.save_game(player, length, self.secret, self.attempts, won=True)
+
+            self.info_label.setText(f"🎉 Победа! Число было {self.secret}")
+            self.info_label.setStyleSheet("color: green;")
+            self.btn_check.setEnabled(False)
+            self.guess_input.setEnabled(False)
+            self.btn_giveup.setEnabled(False)
+
+            self.refresh_record_label()
+            QMessageBox.information(
+                self, "Победа!",
+                f"Вы угадали число {self.secret}!\n"
+                f"Попыток: {self.attempts}\nРезультат сохранён в базу."
+            )
+            return
+
+        self.guess_input.clear()
+        self.guess_input.setFocus()
+
+    def give_up(self):
+        if not self.secret:
+            return
+        reply = QMessageBox.question(
+            self, "Сдаться?",
+            f"Открыть ответ — {self.secret}?\n"
+            "Партия будет сохранена как проигранная.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        player = self.player_input.text().strip() or "Гость"
+        db.save_game(player, self.current_length, self.secret, self.attempts, won=False)
+
+        self.info_label.setText(f"Число было {self.secret}")
+        self.info_label.setStyleSheet("color: red;")
+        self.btn_check.setEnabled(False)
+        self.guess_input.setEnabled(False)
+        self.btn_giveup.setEnabled(False)
+
+    def open_history(self):
+        HistoryDialog(self).exec()
+
+if __name__ == "__main__":
+    db.init_db()
+    app = QApplication(sys.argv)
+    window = BullsCowsWindow()
+    window.show()
+    sys.exit(app.exec())
